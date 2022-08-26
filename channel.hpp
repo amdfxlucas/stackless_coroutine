@@ -295,7 +295,8 @@ template <class T> struct channel {
       }
       return;
     }
-    if (closed && write_head == nullptr) {
+    if (closed && write_head == nullptr) // is the channel closed ? (and no more writes pending ?!)
+    {
       lock.unlock();
       if (set_success(reader->pdone)) {
         reader->closed = true;
@@ -304,6 +305,7 @@ template <class T> struct channel {
       }
       return;
     }
+    // now try to find a writer who has written to the channel that we can read its value from 
 
     auto writer = static_cast<node_t *>(
         detail::remove(write_head, write_tail, write_head));
@@ -311,9 +313,14 @@ template <class T> struct channel {
       writer = static_cast<node_t *>(
           detail::remove(write_head, write_tail, write_head));
     }
-    if (!writer) {
-      detail::add(read_head, read_tail, reader);
-    } else {
+
+    if (!writer) // no one has written anything to the channel that hasnt been read (by someone) by now
+    {
+      detail::add(read_head, read_tail, reader); 
+      // enqueue our read-request for later(so it doesnt get lost)
+      // well be notified(resumed) if someone writes to the channel in the future
+    } else 
+    {
       if ((reader->pdone && writer->pdone != reader->pdone) &&
           !set_success(reader->pdone)) {
         detail::add_head(write_head, write_tail, writer);
@@ -472,7 +479,9 @@ struct channel_reader {
 
   auto get_node() const { return &node; }
   auto get_node() { return &node; }
-  template <class Context> void read(Context context) {
+
+  template <class Context> 
+  void read(Context context) {
 
     node.func = [](detail::node_base *n) {
 
@@ -484,7 +493,9 @@ struct channel_reader {
     node.pdone = nullptr;
     ptr->read(&node);
   }
-  template <class Select, class Context> void read(Select &s, Context context) {
+
+  template <class Select, class Context>
+   void read(Select &s, Context context) {
 
     node.func = [](detail::node_base *n) {
 
@@ -516,6 +527,8 @@ struct channel_reader {
 private:
   PtrType ptr;
 };
+
+
 template <class T, class PtrType = std::shared_ptr<channel<T>>>
 struct channel_writer {
 
@@ -527,7 +540,9 @@ struct channel_writer {
 
   auto get_node() const { return &node; }
   auto get_node() { return &node; }
-  template <class Context> void write(T t, Context context) {
+
+  template <class Context> 
+  void write(T t, Context context) {
     node.value = std::move(t);
 
     node.func = [](detail::node_base *n) {
@@ -541,6 +556,7 @@ struct channel_writer {
     node.pdone = nullptr;
     ptr->write(&node);
   }
+
   template <class Select, class Context>
   void write(Select &s, T t, Context context) {
     node.value = std::move(t);
@@ -660,13 +676,15 @@ template <typename F, typename Tuple> decltype(auto) apply(F &&f, Tuple &&t) {
 }
 }
 
-#ifdef _MSC_VER
-#include <experimental/coroutine>
+// #ifdef _MSC_VER
+//#if __cplusplus == 202002L
+#include <coroutine>
 #include <tuple>
 struct goroutine {
   struct promise_type {
-    bool initial_suspend() { return false; }
-    bool final_suspend() { return false; }
+    std::suspend_never initial_suspend() noexcept{ return {}; }
+    std::suspend_never final_suspend() noexcept { return {}; }
+    void unhandled_exception()noexcept{ }
     void return_void() {}
     void set_exception(std::exception_ptr) {}
     goroutine get_return_object() { return {}; }
@@ -687,20 +705,21 @@ struct await_channel_reader {
   auto get_node() const { return &node; }
   auto get_node() { return &node; }
   auto read() {
+
     struct awaiter {
       await_channel_reader *pthis;
 
       bool await_ready() { return false; }
-      void await_suspend(std::experimental::coroutine_handle<> rh) {
+      void await_suspend(std::coroutine_handle<> rh) {
         auto &node = pthis->node;
         node.func = [](detail::node_base *n) {
           auto node = static_cast<node_t *>(n);
 
           auto rh =
-              std::experimental::coroutine_handle<>::from_address(node->data);
+              std::coroutine_handle<>::from_address(node->data);
           rh();
         };
-        node.data = rh.to_address();
+        node.data = rh.address();
         node.pdone = nullptr;
         pthis->ptr->read(&pthis->node);
       }
@@ -712,15 +731,15 @@ struct await_channel_reader {
     return awaiter{this};
   }
   template <class Select, class Awaiter>
-  void read(Select &s, std::experimental::coroutine_handle<> rh, Awaiter &a) {
-    a.prh = rh.to_address();
+  void read(Select &s, std::coroutine_handle<> rh, Awaiter &a) {
+    a.prh = rh.address();
     node.func = [](detail::node_base *n) {
       auto node = static_cast<node_t *>(n);
 
       auto pa = static_cast<Awaiter *>(node->data);
       std::unique_lock<std::mutex> lock{pa->mut};
       lock.unlock();
-      auto rh = std::experimental::coroutine_handle<>::from_address(pa->prh);
+      auto rh = std::coroutine_handle<>::from_address(pa->prh);
       pa->selected_node = node;
       rh();
     };
@@ -763,14 +782,14 @@ struct await_channel_writer {
       await_channel_writer *pthis;
 
       bool await_ready() { return false; }
-      void await_suspend(std::experimental::coroutine_handle<> rh) {
+      void await_suspend(std::coroutine_handle<> rh) {
         pthis->node.func = [](detail::node_base *n) {
           auto node = static_cast<node_t *>(n);
           auto rh =
-              std::experimental::coroutine_handle<>::from_address(node->data);
+              std::coroutine_handle<>::from_address(node->data);
           rh();
         };
-        pthis->node.data = rh.to_address();
+        pthis->node.data = rh.address();
         pthis->node.pdone = nullptr;
         pthis->ptr->write(&pthis->node);
       }
@@ -778,18 +797,18 @@ struct await_channel_writer {
     };
     return awaiter{this};
   }
-  template <class Select, class T, class Awaiter>
-  void write(Select &s, T t, std::experimental::coroutine_handle<> rh,
+  template <class Select,  class Awaiter>
+  void write(Select &s, T t, std::coroutine_handle<> rh,
              Awaiter &a) {
     node.value = std::move(t);
-    a.prh = rh.to_address();
+    a.prh = rh.address();
     node.func = [](detail::node_base *n) {
       auto node = static_cast<node_t *>(n);
 
       auto pa = static_cast<Awaiter *>(node->data);
       std::unique_lock<std::mutex> lock{pa->mut};
       lock.unlock();
-      auto rh = std::experimental::coroutine_handle<>::from_address(pa->prh);
+      auto rh = std::coroutine_handle<>::from_address(pa->prh);
       pa->selected_node = node;
       rh();
     };
@@ -835,14 +854,14 @@ template <class... T> auto get_fd_tuple(T &&... t) {
 
 template <class This, class Reader, class Func>
 void do_readwrite(detail::reader_type, This *pthis,
-                  std::experimental::coroutine_handle<> &rh, Reader r,
+                  std::coroutine_handle<> &rh, Reader r,
                   Func &f) {
   r->get_node()->success = false;
   r->read(pthis->s, rh, *pthis);
 }
 template <class This, class Writer, class Func, class T>
 void do_readwrite(detail::writer_type, This *pthis,
-                  std::experimental::coroutine_handle<> &rh, Writer w, T t,
+                  std::coroutine_handle<> &rh, Writer w, T t,
                   Func &f) {
 
   w->get_node()->success = false;
@@ -851,7 +870,7 @@ void do_readwrite(detail::writer_type, This *pthis,
 
 template <class This, class Reader, class Func, class R1, class... Rest>
 void do_readwrite(detail::reader_type, This *pthis,
-                  std::experimental::coroutine_handle<> &rh, Reader r, Func &f,
+                  std::coroutine_handle<> &rh, Reader r, Func &f,
                   R1 r1, Rest &&... rest) {
 
   r->get_node()->success = false;
@@ -861,7 +880,7 @@ void do_readwrite(detail::reader_type, This *pthis,
 template <class This, class Writer, class Func, class R1, class T,
           class... Rest>
 void do_readwrite(detail::writer_type, This *pthis,
-                  std::experimental::coroutine_handle<> &rh, Writer w, T t,
+                  std::coroutine_handle<> &rh, Writer w, T t,
                   Func &f, R1 r1, Rest &&... rest) {
 
   w->get_node()->success = false;
@@ -930,7 +949,7 @@ template <class... T> auto select(T &&... t) {
           selected_node{other.selected_node} {}
 
     bool await_ready() { return false; }
-    void await_suspend(std::experimental::coroutine_handle<> rh) {
+    void await_suspend(std::coroutine_handle<> rh) {
       std::unique_lock<std::mutex> lock{mut};
 
       detail::apply(
@@ -973,7 +992,7 @@ template <class Range, class Func> auto select_range(Range &r, Func f) {
           selected_node{other.selected_node} {}
 
     bool await_ready() { return false; }
-    void await_suspend(std::experimental::coroutine_handle<> rh) {
+    void await_suspend(std::coroutine_handle<> rh) {
       std::unique_lock<std::mutex> lock{mut};
       for (auto &r : *rng) {
         detail::do_readwrite(r.get_role(), this, rh, &r, f);
@@ -1005,7 +1024,8 @@ template <class Range, class Func> auto select_range(Range &r, Func f) {
   return awaiter{r, std::move(f)};
 }
 
-#endif // _MSC_VER
+// #endif // _MSC_VER
+
 #include <condition_variable>
 
 struct thread_suspender {
@@ -1091,6 +1111,7 @@ struct sync_channel_reader {
   sync_channel_reader(sync_channel_reader &&) = default;
   sync_channel_reader &operator=(sync_channel_reader &&) = default;
 };
+
 template <class T, class SyncSuspender,
           class PtrType = std::shared_ptr<channel<T>>>
 struct sync_channel_writer {
