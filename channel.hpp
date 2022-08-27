@@ -222,11 +222,14 @@ inline channel_executor &get_channel_executor() {
   return detail::get_channel_executor_raw();
 }
 
-template <class T> struct channel {
+template <class T> struct channel 
+{
   using node_t = detail::node_t<T>;
   using node_base = detail::node_base;
   using function_t = detail::channel_function_t;
-  void write(node_t *writer) {
+
+  void write(node_t *writer)
+   {
     if (closed) {
       if (set_success(writer->pdone)) {
         writer->closed = true;
@@ -244,7 +247,8 @@ template <class T> struct channel {
       reader = static_cast<node_t *>(
           detail::remove(read_head, read_tail, read_head));
     }
-    if (!reader) {
+    if (!reader) 
+    { // if the queue has space left, add the writer's value to the write-buffer
       if (!queue.full()) {
         if (set_success(writer->pdone)) {
           queue.push(std::move(writer->value));
@@ -281,10 +285,15 @@ template <class T> struct channel {
         executor->add(writer);
     }
   }
-  void read(node_t *reader) {
+  void read(node_t *reader) // thread_safe, not a coroutine 
+  {
     lock_t lock{mut};
-    if (!queue.empty()) {
-      if (set_success(reader->pdone)) {
+
+    // if we have any buffered writes in the write_buffer, serve them first ( prior to any additional pending writes)
+    if (!queue.empty()) 
+    {
+      if (set_success(reader->pdone)) 
+      {
         reader->value = std::move(queue.pop());
         lock.unlock();
         reader->closed = false;
@@ -295,7 +304,8 @@ template <class T> struct channel {
       }
       return;
     }
-    if (closed && write_head == nullptr) // is the channel closed ? (and no more writes pending ?!)
+    // given that the queue (write_buffer) is empty , Is the channel closed ? (and no more writes pending ?!)
+    if (closed && write_head == nullptr) 
     {
       lock.unlock();
       if (set_success(reader->pdone)) {
@@ -400,7 +410,9 @@ template <class T> struct channel {
   channel(int buffer = 0, channel_executor *e = &get_channel_executor())
       : executor{e}, queue{buffer} {}
 
-  bool push(T t) {
+  // this adds a value to the write buffer, and returns if the operation succeeded or failed
+  bool push(T t) 
+  {
 
     lock_t lock{mut};
     if (!queue.full() && read_head == nullptr) {
@@ -423,7 +435,7 @@ private:
 
   channel_executor *executor = nullptr;
 
-  detail::fixed_queue<T> queue;
+  detail::fixed_queue<T> queue; // this works as a write_buffer for writes if there are no readers (or not enough)
 
   // 0 = not done, 1 = done, -1 = indeterminate
   static bool set_done(std::atomic<int> *pdone, int expected, int value) {
@@ -467,133 +479,6 @@ struct reader_type {};
 struct writer_type {};
 }
 
-template <class T, class PtrType = std::shared_ptr<channel<T>>>
-struct channel_reader {
-
-  using node_t = typename channel<T>::node_t;
-  node_t node{};
-
-  static auto get_role() { return detail::reader_type{}; }
-
-  using value_type = T;
-
-  auto get_node() const { return &node; }
-  auto get_node() { return &node; }
-
-  template <class Context> 
-  void read(Context context) {
-
-    node.func = [](detail::node_base *n) {
-
-      auto node = static_cast<node_t *>(n);
-      auto context = Context::get_context(node->data);
-      context(node, node->value, node->closed);
-    };
-    node.data = &context.variables();
-    node.pdone = nullptr;
-    ptr->read(&node);
-  }
-
-  template <class Select, class Context>
-   void read(Select &s, Context context) {
-
-    node.func = [](detail::node_base *n) {
-
-      auto node = static_cast<node_t *>(n);
-
-      auto context = Context::get_context(node->data);
-      context(node, detail::void_holder{&node->value}, node->closed);
-    };
-    node.data = &context.variables();
-    node.success = false;
-    node.pdone = &s.done;
-    ptr->read(&node);
-  }
-  void remove() { ptr->remove_reader(&node); }
-
-  void close() { ptr->close(); }
-
-  explicit channel_reader(PtrType p) : ptr{p} {}
-  ~channel_reader() {
-    if (ptr)
-      ptr->remove_reader(&node);
-  }
-
-  channel_reader(const channel_reader &) = delete;
-  channel_reader &operator=(const channel_reader &) = delete;
-  channel_reader(channel_reader &&) = default;
-  channel_reader &operator=(channel_reader &&) = default;
-
-private:
-  PtrType ptr;
-};
-
-
-template <class T, class PtrType = std::shared_ptr<channel<T>>>
-struct channel_writer {
-
-  using node_t = typename channel<T>::node_t;
-  node_t node{};
-
-  using value_type = T;
-  static auto get_role() { return detail::writer_type{}; }
-
-  auto get_node() const { return &node; }
-  auto get_node() { return &node; }
-
-  template <class Context> 
-  void write(T t, Context context) {
-    node.value = std::move(t);
-
-    node.func = [](detail::node_base *n) {
-      auto node = static_cast<node_t *>(n);
-
-      auto context = Context::get_context(node->data);
-      context(node, node->closed);
-    };
-
-    node.data = &context.variables();
-    node.pdone = nullptr;
-    ptr->write(&node);
-  }
-
-  template <class Select, class Context>
-  void write(Select &s, T t, Context context) {
-    node.value = std::move(t);
-
-    node.func = [](detail::node_base *n) {
-      auto node = static_cast<node_t *>(n);
-
-      auto context = Context::get_context(node->data);
-      context(node, detail::void_holder{&node->value}, node->closed);
-    };
-
-    node.data = &context.variables();
-    node.pdone = &s.done;
-    node.success = false;
-    ptr->write(&node);
-  }
-
-  void remove() { ptr->remove_writer(&node); }
-
-  explicit channel_writer(PtrType p) : ptr{p} {}
-
-  void close() { ptr->close(); }
-
-  ~channel_writer() {
-    if (ptr)
-      ptr->remove_writer(&node);
-  }
-
-  channel_writer(const channel_writer &) = delete;
-  channel_writer &operator=(const channel_writer &) = delete;
-
-  channel_writer(channel_writer &&) = default;
-  channel_writer &operator=(channel_writer &&) = default;
-
-private:
-  PtrType ptr;
-};
 
 namespace detail {
 template <class F, class Value>
@@ -606,22 +491,31 @@ void do_call(F &&f, Value *, detail::writer_type) {
 }
 }
 
-struct channel_selector {
+struct channel_selector 
+{
   std::atomic<int> done{0};
 
-  struct select_helper {
+  struct select_helper 
+  {
     channel_selector *sel = nullptr;
     detail::node_base *channel = nullptr;
     detail::void_holder value;
     bool success = false;
     bool closed;
+
     select_helper(channel_selector *s, detail::node_base *channel,
                   detail::void_holder value, bool closed)
         : sel{s}, channel{channel}, value{value}, closed{closed} {}
 
     template <class ChannelReader, class F>
-    select_helper &select(ChannelReader &c, F &&f) {
-      c.remove();
+    select_helper &select(ChannelReader &c, F &&f) 
+    {
+      c.remove(); // channel::remove() is thread safe
+  // why is the reader removed from the channel here ? 
+  // this prevents it from receiving any future writes to the channel,
+  // until it calls read() on the channel the next time
+
+
       auto ns = c.get_node()->success;
       c.get_node()->success = false;
       if (ns) {
@@ -636,7 +530,7 @@ struct channel_selector {
     template <class Range, class F>
     select_helper &select_range(Range &r, F &&f) {
       for (auto &c : r) {
-        c.remove();
+    /*    c.remove();
 
         auto ns = c.get_node()->success;
 
@@ -648,6 +542,10 @@ struct channel_selector {
           detail::do_call(f, static_cast<value_type *>(value.value),
                           ChannelReader::get_role());
         }
+        */
+
+       select(c,std::forward<F>(f) );
+
       }
       return *this;
     }
@@ -661,6 +559,7 @@ struct channel_selector {
     return select_helper{this, channel, value, closed};
   }
 };
+
 namespace detail {
 // Apply adapted from http://isocpp.org/files/papers/N3915.pdf
 template <typename F, typename Tuple, size_t... I>
@@ -704,7 +603,9 @@ struct await_channel_reader {
 
   auto get_node() const { return &node; }
   auto get_node() { return &node; }
-  auto read() {
+
+  auto read() // note that read() is not a coroutine 
+  {
 
     struct awaiter {
       await_channel_reader *pthis;
@@ -712,6 +613,10 @@ struct await_channel_reader {
       bool await_ready() { return false; }
       void await_suspend(std::coroutine_handle<> rh) {
         auto &node = pthis->node;
+
+        // this lambda resumes the await_channel_reader|writer:: read()|write() coroutine 
+        // who is co_await'ing on the operation to complete
+        // [whose address is stored inside node n's data field ]
         node.func = [](detail::node_base *n) {
           auto node = static_cast<node_t *>(n);
 
@@ -749,12 +654,14 @@ struct await_channel_reader {
     node.pdone = &s.done;
     ptr->read(&node);
   }
-  void remove() { ptr->remove_reader(&node); }
+  void remove() { ptr->remove_reader(&node); }// this is thread_safe
 
   explicit await_channel_reader(PtrType p) : ptr{p} {}
   ~await_channel_reader() {
     if (ptr)
       ptr->remove_reader(&node);
+      // if the channel outlives the channel_reader, it could be taken into consideration by the channel,
+      // to receive future writes to it (which would be undefined after the reader has been deleted )
   }
 
   await_channel_reader(const await_channel_reader &) = delete;
@@ -776,7 +683,9 @@ struct await_channel_writer {
 
   auto get_node() const { return &node; }
   auto get_node() { return &node; }
-  auto write(T t) {
+
+  auto write(T t)  // note that write() is not a coroutine
+  {
     node.value = std::move(t);
     struct awaiter {
       await_channel_writer *pthis;

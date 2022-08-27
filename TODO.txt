@@ -1,0 +1,55 @@
+in channel::write() read() can i exchange the std::mutex with an async_mutex ?
+
+
+write an channel<T>& operator>>(channel<T> chan ,T t) , channel<T>& operator<<(channel<T> chan, T t) for channel 
+
+for this operator<</>> must return an awaitable whose await_resume() method
+returns a 'channel<T>&' [no no no! if so, operator<<|>> had to be co_await'ed
+on ]
+
+
+
+its awaiter::await_ready() would always return 'false' just as the
+await_channel_reader|writer's
+
+
+the caller of operator<<|>> would become a coroutine itself
+
+inside the operator<</>> an await_channel_reader|writer would be constructed,
+and awaited on its read()|write method call
+
+
+
+
+what if operator<< returned a task with a nested promise_type
+that would initially suspend_always [no no no, then it had to be manually
+resumed in the top level code !]
+
+this task_type would need to have an operator<<(task_type task, T t) to allow
+for fluent interfaces[  (chan << 0.5) << 0.6 ; ]
+                               1       2
+this (1) would first construct an await_channel_writer and co_await the call to
+'write(0.5)'  (it (1) would eventually be suspended and resumed in the process)
+
+then it would co_return to the top level (0)
+
+
+this would be equivalent to:  auto task = chan << 0.5 ; (1)  [that is auto task=
+operator<<(chan, 0.5); ]
+
+auto task2 = task<<0.6 ; (2) [that is: auto task2= operator<<(task,0.6); ]
+
+
+
+
+
+
+the task would need a getter 'channel<T>& get_channel()'
+
+
+
+
+
+
+i can delete the channel_reader, channel_writer classes cant i? 
+i only need the await_channel_reader/writer

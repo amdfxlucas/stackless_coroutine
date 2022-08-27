@@ -1,0 +1,15 @@
+{
+    "files.associations": {
+        "*.h++": "cpp",
+        "*.ipp": "cpp",
+        "cstdio": "cpp",
+        "any": "cpp",
+        "*.tcc": "cpp",
+        "list": "cpp",
+        "deque": "cpp",
+        "string": "cpp",
+        "vector": "cpp",
+        "functional": "cpp",
+        "type_traits": "cpp"
+    }
+}
